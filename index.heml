@@ -1,0 +1,374 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+// Fix 1: Added signInWithCustomToken to imports
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  query, 
+  orderBy, 
+  onSnapshot, 
+  serverTimestamp,
+  limit 
+} from 'firebase/firestore';
+import { 
+  Shield, 
+  User, 
+  Lock, 
+  LogIn, 
+  MapPin, 
+  Activity, 
+  Database,
+  CheckCircle,
+  XCircle,
+  LogOut
+} from 'lucide-react';
+
+// --- Firebase 設定與初始化 ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginState, setLoginState] = useState('idle'); // idle, loading, success, admin
+  const [logs, setLogs] = useState([]);
+  const [clientInfo, setClientInfo] = useState({ ip: '載入中...', city: '', country: '' });
+  const [errorMsg, setErrorMsg] = useState('');
+
+  // 1. 初始化 Firebase 驗證 (匿名登入以使用 Firestore)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Authentication error:", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. 獲取用戶 IP 和位置資訊 (使用 ipapi.co 作為替代方案，比較穩定)
+  useEffect(() => {
+    const fetchIP = async () => {
+      try {
+        // Fix 2: Changed API endpoint and added better error handling
+        const response = await fetch('https://ipapi.co/json/');
+        if (!response.ok) throw new Error('Network response was not ok');
+        
+        const data = await response.json();
+        setClientInfo({
+          ip: data.ip || '未知 IP',
+          city: data.city || '未知城市',
+          country: data.country_name || '未知國家',
+          region: data.region || ''
+        });
+      } catch (e) {
+        console.warn("Primary IP fetch failed, trying fallback...", e);
+        // Fallback to simple IPify if location fails
+        try {
+          const fallbackRes = await fetch('https://api.ipify.org?format=json');
+          const fallbackData = await fallbackRes.json();
+          setClientInfo({
+             ip: fallbackData.ip,
+             city: '位置無法取得',
+             country: '未知',
+             region: ''
+          });
+        } catch (err2) {
+           console.error("All IP fetch methods failed", err2);
+           setClientInfo(prev => ({ ...prev, ip: '無法獲取 IP' }));
+        }
+      }
+    };
+    fetchIP();
+  }, []);
+
+  // 3. 監聽日誌數據 (僅當是管理員時才顯示數據，但為了演示，我們預先加載邏輯)
+  useEffect(() => {
+    if (!user) return;
+    
+    // 這裡我們讀取公共數據集合，模擬 VPS 上的日誌文件
+    const q = query(
+      collection(db, 'artifacts', appId, 'public', 'data', 'login_logs'),
+      orderBy('timestamp', 'desc'),
+      limit(50)
+    );
+
+    const unsubscribeLogs = onSnapshot(q, (snapshot) => {
+      const logsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setLogs(logsData);
+    }, (error) => {
+      // Handle permission errors gracefully (user might not be allowed to read if rules change)
+      console.log("Fetching logs status:", error.code); 
+    });
+
+    return () => unsubscribeLogs();
+  }, [user]);
+
+  // 4. 處理登入邏輯
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (!username || !password) {
+      setErrorMsg('請輸入帳號與密碼');
+      return;
+    }
+    
+    setErrorMsg('');
+    setLoginState('loading');
+
+    // 核心邏輯判斷
+    const isAdmin = (username === 'sufu5403' && password === 'sufu5403');
+    const isSuccess = isAdmin || (username === password);
+    
+    // 記錄到資料庫 (模擬 VPS Log)
+    if (user) {
+      try {
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'login_logs'), {
+          username: username,
+          // 為了安全與隱私，通常不建議明文記錄密碼，這裡依需求記錄帳號與狀態
+          status: isSuccess ? (isAdmin ? 'Admin Login' : 'Success') : 'Failed',
+          ip: clientInfo.ip,
+          location: `${clientInfo.city}, ${clientInfo.country}` || '未知位置',
+          timestamp: serverTimestamp(),
+          userAgent: navigator.userAgent
+        });
+      } catch (err) {
+        console.error("Logging failed", err);
+      }
+    }
+
+    // UI 狀態切換
+    setTimeout(() => {
+      if (isAdmin) {
+        setLoginState('admin');
+      } else if (isSuccess) {
+        setLoginState('success');
+      } else {
+        setLoginState('idle');
+        setErrorMsg('登入失敗：帳號與密碼不一致');
+      }
+    }, 800);
+  };
+
+  const handleLogout = () => {
+    setLoginState('idle');
+    setUsername('');
+    setPassword('');
+    setErrorMsg('');
+  };
+
+  // --- 渲染畫面 ---
+
+  // 1. 管理員後台視圖
+  if (loginState === 'admin') {
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-200 p-6 font-sans">
+        <div className="max-w-6xl mx-auto">
+          <header className="flex justify-between items-center mb-8 border-b border-slate-700 pb-4">
+            <div className="flex items-center gap-3">
+              <Database className="w-8 h-8 text-emerald-400" />
+              <div>
+                <h1 className="text-2xl font-bold text-white">VPS 系統監控後台</h1>
+                <p className="text-slate-400 text-sm">管理員: sufu5403 | 資料庫連線正常</p>
+              </div>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors text-sm"
+            >
+              <LogOut className="w-4 h-4" /> 登出系統
+            </button>
+          </header>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+              <div className="flex items-center gap-3 mb-2">
+                <Activity className="w-5 h-5 text-blue-400" />
+                <h3 className="font-semibold">總紀錄筆數</h3>
+              </div>
+              <p className="text-3xl font-mono">{logs.length}</p>
+            </div>
+            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+              <div className="flex items-center gap-3 mb-2">
+                <Shield className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-semibold">目前您的 IP</h3>
+              </div>
+              <p className="text-xl font-mono text-emerald-300">{clientInfo.ip}</p>
+              <p className="text-xs text-slate-400 mt-1">{clientInfo.city}, {clientInfo.country}</p>
+            </div>
+          </div>
+
+          <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-xl">
+            <div className="p-4 bg-slate-800 border-b border-slate-700">
+              <h2 className="font-bold text-lg flex items-center gap-2">
+                <User className="w-5 h-5" /> 用戶登入日誌 (最新 50 筆)
+              </h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm text-slate-300">
+                <thead className="bg-slate-900/50 text-slate-400 uppercase text-xs">
+                  <tr>
+                    <th className="px-6 py-4">時間</th>
+                    <th className="px-6 py-4">嘗試帳號</th>
+                    <th className="px-6 py-4">狀態</th>
+                    <th className="px-6 py-4">來源 IP</th>
+                    <th className="px-6 py-4">地理位置 (ISP)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700">
+                  {logs.map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-700/50 transition-colors">
+                      <td className="px-6 py-3 font-mono text-xs">
+                        {log.timestamp ? new Date(log.timestamp.seconds * 1000).toLocaleString('zh-TW') : '處理中...'}
+                      </td>
+                      <td className="px-6 py-3 font-medium text-white">{log.username}</td>
+                      <td className="px-6 py-3">
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium
+                          ${log.status === 'Failed' 
+                            ? 'bg-red-900/30 text-red-400 border border-red-800' 
+                            : log.status === 'Admin Login'
+                              ? 'bg-purple-900/30 text-purple-400 border border-purple-800'
+                              : 'bg-emerald-900/30 text-emerald-400 border border-emerald-800'
+                          }`}>
+                          {log.status === 'Failed' ? <XCircle className="w-3 h-3"/> : <CheckCircle className="w-3 h-3"/>}
+                          {log.status === 'Failed' ? '失敗' : log.status === 'Admin Login' ? '管理員' : '成功'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-3 font-mono text-slate-400">{log.ip}</td>
+                      <td className="px-6 py-3 flex items-center gap-2">
+                        <MapPin className="w-3 h-3 text-slate-500" />
+                        {log.location}
+                      </td>
+                    </tr>
+                  ))}
+                  {logs.length === 0 && (
+                    <tr>
+                      <td colSpan="5" className="px-6 py-8 text-center text-slate-500">
+                        尚無登入資料
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. 一般用戶成功登入視圖
+  if (loginState === 'success') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-blue-100 flex items-center justify-center p-4 font-sans">
+        <div className="bg-white w-full max-w-md p-8 rounded-2xl shadow-xl text-center space-y-6">
+          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <CheckCircle className="w-10 h-10 text-green-600" />
+          </div>
+          <h2 className="text-3xl font-bold text-gray-800">登入成功！</h2>
+          <p className="text-gray-600">
+            歡迎回來，<span className="font-bold text-indigo-600">{username}</span>
+          </p>
+          <div className="bg-gray-50 p-4 rounded-lg text-sm text-left border border-gray-200">
+            <p className="text-gray-500 mb-1">系統訊息：</p>
+            <p>您的 IP ({clientInfo.ip}) 已經被系統確認。</p>
+          </div>
+          <button 
+            onClick={handleLogout}
+            className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors"
+          >
+            登出
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. 登入表單 (預設畫面)
+  return (
+    <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4 font-sans">
+      <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+        <div className="bg-indigo-600 p-6 text-center">
+          <h1 className="text-2xl font-bold text-white tracking-wide">系統登入</h1>
+          <p className="text-indigo-200 text-sm mt-2">請輸入您的帳戶資訊以存取 VPS</p>
+        </div>
+
+        <div className="p-8">
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                <User className="w-4 h-4" /> 帳號
+              </label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none"
+                placeholder="請輸入帳號"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                <Lock className="w-4 h-4" /> 密碼
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none"
+                placeholder="請輸入密碼"
+              />
+              <p className="text-xs text-gray-500 text-right">提示：帳號與密碼相同即可登入</p>
+            </div>
+
+            {errorMsg && (
+              <div className="p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center gap-2 animate-pulse">
+                <XCircle className="w-4 h-4" /> {errorMsg}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loginState === 'loading'}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg transition-all transform active:scale-95 flex justify-center items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+            >
+              {loginState === 'loading' ? (
+                <span>處理中...</span>
+              ) : (
+                <>
+                  <LogIn className="w-5 h-5" /> 立即登入
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="mt-8 pt-6 border-t border-gray-100">
+            <div className="flex justify-between items-center text-xs text-gray-400">
+              <span className="flex items-center gap-1">
+                <MapPin className="w-3 h-3" />
+                {clientInfo.ip}
+              </span>
+              <span>Secure Server V1.0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
